@@ -1,0 +1,21 @@
+{
+  "name": "shared-agent-context",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Share AI/agent context between collaborators so teammates' agents stop rediscovering the same things.",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "build:server": "npm run build -w @sac/server",
+    "build:mcp": "npm run build -w @sac/mcp",
+    "start:server": "npm run start -w @sac/server",
+    "dev:server": "npm run dev -w @sac/server",
+    "start:mcp": "npm run start -w @sac/mcp",
+    "dev:mcp": "npm run dev -w @sac/mcp"
+  },
+  "engines": {
+    "node": ">=18.17.0"
+  }
+}
