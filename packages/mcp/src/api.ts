@@ -1,5 +1,5 @@
 import { config } from "./config.js";
-import type { Learning, SearchResult } from "./types.js";
+import type { ContextCommit, PullResult } from "./types.js";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const url = `${config.serverUrl}${path}`;
@@ -26,51 +26,47 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
-export interface CreateInput {
+export interface CommitPayload {
   projectId: string;
   author: string;
-  title: string;
-  content: string;
-  kind?: string;
-  tags?: string[];
+  summary: string;
+  details?: string;
+  highlights?: string[];
+  whereILeftOff?: string;
+  nextSteps?: string[];
   files?: string[];
-}
-
-export interface SearchInput {
-  projectId: string;
-  q?: string;
   tags?: string[];
-  limit?: number;
-  markUsed?: boolean;
+  branch?: string;
+  kind?: string;
 }
 
 export const api = {
   health: () => request<{ ok: boolean }>("/api/health"),
 
-  create: (input: CreateInput) =>
-    request<Learning>("/api/learnings", {
+  commit: (payload: CommitPayload) =>
+    request<ContextCommit>("/api/commits", {
       method: "POST",
-      body: JSON.stringify(input),
+      body: JSON.stringify(payload),
     }),
 
-  search: (params: SearchInput) => {
-    const qs = new URLSearchParams();
-    qs.set("projectId", params.projectId);
-    if (params.q) qs.set("q", params.q);
-    if (params.tags?.length) qs.set("tags", params.tags.join(","));
-    if (params.limit) qs.set("limit", String(params.limit));
-    if (params.markUsed) qs.set("markUsed", "true");
-    return request<{ results: SearchResult[] }>(
-      `/api/learnings?${qs.toString()}`
-    );
+  pull: (projectId: string, author: string, limit?: number) =>
+    request<PullResult>("/api/commits/pull", {
+      method: "POST",
+      body: JSON.stringify({ projectId, author, limit }),
+    }),
+
+  log: (projectId: string, limit?: number) => {
+    const qs = new URLSearchParams({ projectId });
+    if (limit) qs.set("limit", String(limit));
+    return request<{ commits: ContextCommit[] }>(`/api/commits?${qs.toString()}`);
   },
 
   vote: (id: string, delta: 1 | -1) =>
-    request<Learning>(`/api/learnings/${id}/vote`, {
+    request<ContextCommit>(`/api/commits/${id}/vote`, {
       method: "POST",
       body: JSON.stringify({ delta }),
     }),
 
   remove: (id: string) =>
-    request<void>(`/api/learnings/${id}`, { method: "DELETE" }),
+    request<void>(`/api/commits/${id}`, { method: "DELETE" }),
 };

@@ -1,65 +1,65 @@
 import { Router } from "express";
-import type { LearningStore } from "./store.js";
-import type { CreateLearningInput } from "./types.js";
+import type { ContextStore } from "./store.js";
+import type { CreateCommitInput } from "./types.js";
 
-export function createRouter(store: LearningStore): Router {
+export function createRouter(store: ContextStore): Router {
   const router = Router();
 
   router.get("/health", (_req, res) => {
     res.json({ ok: true });
   });
 
-  // Create a learning.
-  router.post("/learnings", (req, res) => {
-    const body = (req.body ?? {}) as Partial<CreateLearningInput>;
-    if (typeof body.title !== "string" || typeof body.content !== "string") {
-      return res
-        .status(400)
-        .json({ error: "title and content are required strings" });
+  // Commit a context snapshot.
+  router.post("/commits", (req, res) => {
+    const body = (req.body ?? {}) as Partial<CreateCommitInput>;
+    if (typeof body.summary !== "string" || body.summary.trim() === "") {
+      return res.status(400).json({ error: "summary is required" });
     }
-    const learning = store.create({
+    const commit = store.commit({
       projectId: (body.projectId ?? "default").toString(),
       author: (body.author ?? "unknown").toString(),
-      title: body.title,
-      content: body.content,
+      summary: body.summary,
+      details: typeof body.details === "string" ? body.details : undefined,
+      highlights: asStringArray(body.highlights),
+      whereILeftOff:
+        typeof body.whereILeftOff === "string" ? body.whereILeftOff : undefined,
+      nextSteps: asStringArray(body.nextSteps),
+      files: asStringArray(body.files),
+      tags: asStringArray(body.tags),
+      branch: typeof body.branch === "string" ? body.branch : undefined,
       kind: body.kind,
-      tags: Array.isArray(body.tags) ? body.tags.map(String) : [],
-      files: Array.isArray(body.files) ? body.files.map(String) : [],
     });
-    res.status(201).json(learning);
+    res.status(201).json(commit);
   });
 
-  // Search / list learnings, ranked by relevance.
-  router.get("/learnings", (req, res) => {
+  // The project timeline (like `git log`), newest first.
+  router.get("/commits", (req, res) => {
     const projectId = (req.query.projectId ?? "default").toString();
-    const query = (req.query.q ?? "").toString();
-    const tags = parseTags(req.query.tags);
-    const limit = clampLimit(req.query.limit);
-    const markUsed = req.query.markUsed === "true";
-
-    const results = store.search({ projectId, query, tags, limit });
-    if (markUsed) store.markUsed(results.map((r) => r.learning.id));
-    res.json({ results });
+    const limit = clampLimit(req.query.limit, 10);
+    res.json({ commits: store.log(projectId, limit) });
   });
 
-  router.get("/learnings/:id", (req, res) => {
-    const learning = store.get(req.params.id);
-    if (!learning) return res.status(404).json({ error: "not found" });
-    res.json(learning);
+  // Pull: teammates' commits since the caller last pulled.
+  router.post("/commits/pull", (req, res) => {
+    const body = (req.body ?? {}) as { projectId?: string; author?: string; limit?: number };
+    const projectId = (body.projectId ?? "default").toString();
+    const author = (body.author ?? "unknown").toString();
+    const limit = clampLimit(body.limit, 10);
+    res.json(store.pull(projectId, author, limit));
   });
 
   // Curation: upvote (delta=1) or downvote (delta=-1).
-  router.post("/learnings/:id/vote", (req, res) => {
+  router.post("/commits/:id/vote", (req, res) => {
     const delta = Number((req.body as { delta?: unknown })?.delta);
     if (delta !== 1 && delta !== -1) {
       return res.status(400).json({ error: "delta must be 1 or -1" });
     }
-    const learning = store.vote(req.params.id, delta);
-    if (!learning) return res.status(404).json({ error: "not found" });
-    res.json(learning);
+    const commit = store.vote(req.params.id, delta);
+    if (!commit) return res.status(404).json({ error: "not found" });
+    res.json(commit);
   });
 
-  router.delete("/learnings/:id", (req, res) => {
+  router.delete("/commits/:id", (req, res) => {
     const ok = store.delete(req.params.id);
     if (!ok) return res.status(404).json({ error: "not found" });
     res.status(204).end();
@@ -68,16 +68,13 @@ export function createRouter(store: LearningStore): Router {
   return router;
 }
 
-function parseTags(value: unknown): string[] {
-  if (typeof value !== "string" || value.trim() === "") return [];
-  return value
-    .split(",")
-    .map((t) => t.trim())
-    .filter(Boolean);
+function asStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.map(String);
 }
 
-function clampLimit(value: unknown): number {
+function clampLimit(value: unknown, fallback: number): number {
   const n = Number(value);
-  if (!Number.isFinite(n) || n <= 0) return 8;
+  if (!Number.isFinite(n) || n <= 0) return fallback;
   return Math.min(Math.floor(n), 50);
 }

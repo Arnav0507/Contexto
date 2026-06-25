@@ -4,71 +4,192 @@ import { z } from "zod";
 import { api } from "./api.js";
 import { config } from "./config.js";
 import { redactSecrets } from "./redact.js";
-import type { Learning, SearchResult } from "./types.js";
+import type { ContextCommit } from "./types.js";
 
 const server = new McpServer({
   name: "shared-agent-context",
-  version: "0.1.0",
+  version: "0.2.0",
 });
 
-function formatLearning(l: Learning, score?: number): string {
+// ---------- formatting helpers ----------
+
+function relativeTime(iso: string): string {
+  const then = new Date(iso).getTime();
+  const mins = Math.round((Date.now() - then) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.round(hrs / 24);
+  return `${days}d ago`;
+}
+
+function bullets(items: string[]): string {
+  return items.map((i) => `  - ${i}`).join("\n");
+}
+
+function formatCommit(c: ContextCommit): string {
   const meta = [
-    `id: ${l.id}`,
-    `by ${l.author}`,
-    l.kind,
-    l.tags.length ? `tags: ${l.tags.join(", ")}` : null,
-    l.files.length ? `files: ${l.files.join(", ")}` : null,
-    `votes: ${l.votes}`,
-    typeof score === "number" && score > 0 ? `score: ${score.toFixed(2)}` : null,
+    `[${c.kind}]`,
+    `by ${c.author}`,
+    relativeTime(c.createdAt),
+    c.branch ? `branch ${c.branch}` : null,
+    `id ${c.id}`,
   ]
     .filter(Boolean)
     .join(" · ");
-  return `### ${l.title}\n${meta}\n\n${l.content}`;
+
+  const parts = [`### ${c.summary}`, meta];
+  if (c.details) parts.push(`\n${c.details}`);
+  if (c.highlights.length) parts.push(`\nHighlights:\n${bullets(c.highlights)}`);
+  if (c.whereILeftOff) parts.push(`\nWhere I left off: ${c.whereILeftOff}`);
+  if (c.nextSteps.length) parts.push(`\nNext steps:\n${bullets(c.nextSteps)}`);
+  if (c.files.length) parts.push(`\nFiles: ${c.files.join(", ")}`);
+  if (c.tags.length) parts.push(`Tags: ${c.tags.join(", ")}`);
+  return parts.join("\n");
 }
 
+function redactList(items: string[] | undefined): {
+  values: string[];
+  count: number;
+} {
+  let count = 0;
+  const values = (items ?? []).map((i) => {
+    const r = redactSecrets(i);
+    count += r.count;
+    return r.text;
+  });
+  return { values, count };
+}
+
+// ---------- tools ----------
+
 server.registerTool(
-  "remember_learning",
+  "pull_context",
   {
-    title: "Remember a learning",
+    title: "Pull team context",
     description:
-      "Save a reusable learning (a gotcha, decision, how-to, or convention) to the team's shared context store so teammates' agents can benefit later. Secrets are automatically redacted before anything is shared. Call this whenever you discover something non-obvious about this project.",
+      "Run this at the START of a session on this project (or when returning to it) to catch up on what your teammates have shared since you last pulled. Returns their context snapshots — what they did, where they left off, and next steps — so you start already up to speed instead of asking around.",
     inputSchema: {
-      title: z.string().describe("Short, searchable summary of the learning"),
-      content: z
-        .string()
-        .describe("The full detail worth sharing with the team"),
-      kind: z
-        .enum(["gotcha", "decision", "howto", "convention", "other"])
+      limit: z
+        .number()
+        .int()
+        .positive()
+        .max(25)
         .optional()
-        .describe("Type of learning"),
-      tags: z
+        .describe("Max snapshots to return (default 10)"),
+    },
+  },
+  async ({ limit }) => {
+    const { commits, since, firstPull } = await api.pull(
+      config.projectId,
+      config.author,
+      limit ?? 10
+    );
+
+    if (commits.length === 0) {
+      const when = firstPull ? "" : ` since ${relativeTime(since!)}`;
+      return {
+        content: [
+          {
+            type: "text",
+            text: `You're up to date on "${config.projectId}" — no new teammate context${when}.`,
+          },
+        ],
+      };
+    }
+
+    const header = firstPull
+      ? `Welcome to "${config.projectId}". Here ${
+          commits.length === 1 ? "is" : "are"
+        } the ${commits.length} most recent team context snapshot(s):`
+      : `${commits.length} new update(s) from your team on "${config.projectId}" since you last pulled:`;
+
+    const body = commits.map(formatCommit).join("\n\n---\n\n");
+    return {
+      content: [{ type: "text", text: `${header}\n\n${body}` }],
+    };
+  }
+);
+
+server.registerTool(
+  "commit_context",
+  {
+    title: "Commit your context",
+    description:
+      "Run this when you hit a breakthrough or finish for the day, to share your working context with teammates. Summarize THIS session into a snapshot another developer could resume from: what you did, key decisions/breakthroughs, where you left off, and next steps. Secrets are auto-redacted before sharing. The project and your identity are detected from the git repo automatically.",
+    inputSchema: {
+      summary: z
+        .string()
+        .describe("One-line headline of what this session was about"),
+      details: z
+        .string()
+        .optional()
+        .describe("Fuller narrative: what you tried, decisions and why"),
+      highlights: z
         .array(z.string())
         .optional()
-        .describe("Topical tags, e.g. ['build', 'auth']"),
+        .describe("Key breakthroughs or decisions, as short bullets"),
+      whereILeftOff: z
+        .string()
+        .optional()
+        .describe("Current state — where a teammate should resume from"),
+      nextSteps: z
+        .array(z.string())
+        .optional()
+        .describe("Concrete next actions, open questions, or blockers"),
       files: z
         .array(z.string())
         .optional()
-        .describe("Related file paths this learning concerns"),
+        .describe("Files touched this session"),
+      tags: z.array(z.string()).optional().describe("Topical tags"),
+      kind: z
+        .enum(["eod", "breakthrough", "handoff", "note"])
+        .optional()
+        .describe(
+          "Why you're committing: end-of-day, a breakthrough, a handoff, or a quick note"
+        ),
     },
   },
-  async ({ title, content, kind, tags, files }) => {
-    const redactedTitle = redactSecrets(title);
-    const redactedContent = redactSecrets(content);
-    const redactions = redactedTitle.count + redactedContent.count;
+  async ({
+    summary,
+    details,
+    highlights,
+    whereILeftOff,
+    nextSteps,
+    files,
+    tags,
+    kind,
+  }) => {
+    const rSummary = redactSecrets(summary);
+    const rDetails = redactSecrets(details ?? "");
+    const rWhere = redactSecrets(whereILeftOff ?? "");
+    const rHighlights = redactList(highlights);
+    const rNext = redactList(nextSteps);
+    const redactions =
+      rSummary.count +
+      rDetails.count +
+      rWhere.count +
+      rHighlights.count +
+      rNext.count;
 
-    const learning = await api.create({
+    const commit = await api.commit({
       projectId: config.projectId,
       author: config.author,
-      title: redactedTitle.text,
-      content: redactedContent.text,
-      kind,
-      tags,
+      summary: rSummary.text,
+      details: rDetails.text || undefined,
+      highlights: rHighlights.values,
+      whereILeftOff: rWhere.text || undefined,
+      nextSteps: rNext.values,
       files,
+      tags,
+      branch: config.branch || undefined,
+      kind,
     });
 
     const note =
       redactions > 0
-        ? `\n\nNote: redacted ${redactions} potential secret${
+        ? `\nRedacted ${redactions} potential secret${
             redactions === 1 ? "" : "s"
           } before sharing.`
         : "";
@@ -77,7 +198,7 @@ server.registerTool(
       content: [
         {
           type: "text",
-          text: `Saved to shared context for project "${config.projectId}".\nid: ${learning.id}${note}`,
+          text: `Committed your context to "${config.projectId}" as ${config.author}.\nid: ${commit.id}${note}\nTeammates will receive this next time they pull_context.`,
         },
       ],
     };
@@ -85,121 +206,58 @@ server.registerTool(
 );
 
 server.registerTool(
-  "recall_context",
+  "context_log",
   {
-    title: "Recall shared context",
+    title: "Context log",
     description:
-      "Before starting a task — or whenever you hit something unfamiliar — retrieve the most relevant learnings your teammates have already captured for this project. Call this proactively to avoid rediscovering known gotchas and conventions.",
+      "Show the recent timeline of team context commits for this project (like `git log`), without affecting your pull position. Useful to browse history or find a specific snapshot.",
     inputSchema: {
-      query: z
-        .string()
-        .describe(
-          "What you're working on, e.g. 'setting up auth middleware' or 'why is the build failing'"
-        ),
-      tags: z
-        .array(z.string())
-        .optional()
-        .describe("Optionally restrict to these tags"),
       limit: z
         .number()
         .int()
         .positive()
-        .max(20)
+        .max(50)
         .optional()
-        .describe("Max results (default 5)"),
+        .describe("Max commits to show (default 10)"),
     },
   },
-  async ({ query, tags, limit }) => {
-    const { results } = await api.search({
-      projectId: config.projectId,
-      q: query,
-      tags,
-      limit: limit ?? 5,
-      markUsed: true,
-    });
-
-    if (results.length === 0) {
+  async ({ limit }) => {
+    const { commits } = await api.log(config.projectId, limit ?? 10);
+    if (commits.length === 0) {
       return {
         content: [
           {
             type: "text",
-            text: `No shared learnings found for "${query}" in project "${config.projectId}" yet. As you work, use remember_learning to capture useful findings for your teammates.`,
+            text: `No context committed for "${config.projectId}" yet.`,
           },
         ],
       };
     }
-
-    const body = results
-      .map((r: SearchResult) => formatLearning(r.learning, r.score))
-      .join("\n\n---\n\n");
-
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Found ${results.length} relevant learning(s) from your team:\n\n${body}`,
-        },
-      ],
-    };
-  }
-);
-
-server.registerTool(
-  "list_recent_learnings",
-  {
-    title: "List recent learnings",
-    description:
-      "Browse the most recently captured shared learnings for this project.",
-    inputSchema: {
-      limit: z
-        .number()
-        .int()
-        .positive()
-        .max(20)
-        .optional()
-        .describe("Max results (default 10)"),
-    },
-  },
-  async ({ limit }) => {
-    const { results } = await api.search({
-      projectId: config.projectId,
-      limit: limit ?? 10,
-    });
-
-    if (results.length === 0) {
-      return {
-        content: [{ type: "text", text: "No learnings captured yet." }],
-      };
-    }
-
-    const body = results
-      .map((r: SearchResult) => formatLearning(r.learning))
-      .join("\n\n---\n\n");
-
+    const body = commits.map(formatCommit).join("\n\n---\n\n");
     return { content: [{ type: "text", text: body }] };
   }
 );
 
 server.registerTool(
-  "vote_learning",
+  "vote_commit",
   {
-    title: "Vote on a learning",
+    title: "Vote on a context commit",
     description:
-      "Mark a shared learning as helpful or not. Helpful learnings rank higher for everyone; unhelpful ones sink. This keeps the shared context curated and trustworthy.",
+      "Mark a teammate's context commit as helpful or not, to keep the shared timeline curated and trustworthy.",
     inputSchema: {
-      id: z.string().describe("The learning id"),
+      id: z.string().describe("The commit id"),
       helpful: z.boolean().describe("true = upvote, false = downvote"),
     },
   },
   async ({ id, helpful }) => {
-    const learning = await api.vote(id, helpful ? 1 : -1);
+    const commit = await api.vote(id, helpful ? 1 : -1);
     return {
       content: [
         {
           type: "text",
           text: `Recorded ${helpful ? "upvote" : "downvote"} for "${
-            learning.title
-          }" (net votes: ${learning.votes}).`,
+            commit.summary
+          }" (net votes: ${commit.votes}).`,
         },
       ],
     };
@@ -207,29 +265,27 @@ server.registerTool(
 );
 
 server.registerTool(
-  "forget_learning",
+  "forget_commit",
   {
-    title: "Forget a learning",
+    title: "Forget a context commit",
     description:
-      "Delete a stale or incorrect learning from the shared store so it stops being surfaced to the team.",
+      "Delete a stale or incorrect context commit so it stops being surfaced to the team.",
     inputSchema: {
-      id: z.string().describe("The learning id to remove"),
+      id: z.string().describe("The commit id to remove"),
     },
   },
   async ({ id }) => {
     await api.remove(id);
     return {
       content: [
-        { type: "text", text: `Removed learning ${id} from shared context.` },
+        { type: "text", text: `Removed context commit ${id}.` },
       ],
     };
   }
 );
 
 async function main(): Promise<void> {
-  // Probe the backend so we can log a friendly warning, but don't block startup
-  // — individual tools report connection errors clearly when invoked.
-  // NOTE: stdout is reserved for the MCP protocol, so all logging uses stderr.
+  // stdout is reserved for the MCP protocol, so all logging goes to stderr.
   try {
     await api.health();
   } catch (err) {
@@ -239,8 +295,9 @@ async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(
-    `[sac] shared-agent-context MCP server ready ` +
-      `(project "${config.projectId}", backend ${config.serverUrl}, author "${config.author}")`
+    `[sac] shared-agent-context ready · project "${config.projectId}" · ` +
+      `author "${config.author}"${config.branch ? ` · branch ${config.branch}` : ""} · ` +
+      `backend ${config.serverUrl}`
   );
 }
 

@@ -2,14 +2,14 @@ import { resolve } from "node:path";
 import cors from "cors";
 import express from "express";
 import { createRouter } from "./routes.js";
-import { LearningStore } from "./store.js";
+import { ContextStore } from "./store.js";
 
 const PORT = Number(process.env.PORT ?? 4000);
 const DATA_FILE = process.env.SAC_DATA_FILE
   ? resolve(process.env.SAC_DATA_FILE)
-  : resolve(process.cwd(), "data", "learnings.json");
+  : resolve(process.cwd(), "data", "commits.json");
 
-const store = new LearningStore(DATA_FILE);
+const store = new ContextStore(DATA_FILE);
 
 const app = express();
 app.use(cors());

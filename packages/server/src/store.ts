@@ -1,33 +1,31 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { scoreLearning, tokenize } from "./ranking.js";
-import type {
-  CreateLearningInput,
-  Learning,
-  LearningKind,
-  SearchResult,
-} from "./types.js";
+import type { CommitKind, ContextCommit, CreateCommitInput } from "./types.js";
 
-const VALID_KINDS: LearningKind[] = [
-  "gotcha",
-  "decision",
-  "howto",
-  "convention",
-  "other",
-];
+const VALID_KINDS: CommitKind[] = ["eod", "breakthrough", "handoff", "note"];
 
 interface StoreData {
-  learnings: Learning[];
+  commits: ContextCommit[];
+  /** `${projectId}::${author}` -> ISO timestamp of that person's last pull. */
+  pulls: Record<string, string>;
+}
+
+export interface PullResult {
+  commits: ContextCommit[];
+  /** The timestamp the caller had last pulled at (null on first pull). */
+  since: string | null;
+  /** Whether this was the caller's first pull on this project. */
+  firstPull: boolean;
 }
 
 /**
- * Tiny JSON-file backed store. Zero native dependencies so it "just runs" on any
- * machine for the demo. The interface is deliberately DB-shaped so it can be
- * swapped for SQLite/Postgres/a vector DB later.
+ * JSON-file backed store for context commits. Zero native dependencies so it
+ * "just runs" anywhere for the demo; the interface is DB-shaped so it can be
+ * swapped for SQLite/Postgres + a hosted deployment later.
  */
-export class LearningStore {
-  private data: StoreData = { learnings: [] };
+export class ContextStore {
+  private data: StoreData = { commits: [], pulls: {} };
 
   constructor(private readonly filePath: string) {
     this.load();
@@ -39,10 +37,13 @@ export class LearningStore {
       const parsed = JSON.parse(
         readFileSync(this.filePath, "utf8")
       ) as Partial<StoreData>;
-      this.data = { learnings: parsed.learnings ?? [] };
+      this.data = {
+        commits: parsed.commits ?? [],
+        pulls: parsed.pulls ?? {},
+      };
     } catch {
-      // Corrupt file — start fresh rather than crash the server.
-      this.data = { learnings: [] };
+      // Corrupt file — start fresh rather than crash.
+      this.data = { commits: [], pulls: {} };
     }
   }
 
@@ -52,101 +53,83 @@ export class LearningStore {
     writeFileSync(this.filePath, JSON.stringify(this.data, null, 2), "utf8");
   }
 
-  create(input: CreateLearningInput): Learning {
-    const now = new Date().toISOString();
-    const kind: LearningKind =
-      input.kind && VALID_KINDS.includes(input.kind) ? input.kind : "other";
-    const learning: Learning = {
+  commit(input: CreateCommitInput): ContextCommit {
+    const kind: CommitKind =
+      input.kind && VALID_KINDS.includes(input.kind) ? input.kind : "note";
+    const commit: ContextCommit = {
       id: randomUUID(),
       projectId: input.projectId,
       author: input.author,
-      title: input.title.trim(),
-      content: input.content.trim(),
+      summary: input.summary.trim(),
+      details: (input.details ?? "").trim(),
+      highlights: cleanList(input.highlights),
+      whereILeftOff: (input.whereILeftOff ?? "").trim(),
+      nextSteps: cleanList(input.nextSteps),
+      files: cleanList(input.files),
+      tags: cleanList(input.tags),
+      branch: (input.branch ?? "").trim(),
       kind,
-      tags: dedupe((input.tags ?? []).map((t) => t.trim()).filter(Boolean)),
-      files: dedupe((input.files ?? []).map((f) => f.trim()).filter(Boolean)),
-      createdAt: now,
-      updatedAt: now,
+      createdAt: new Date().toISOString(),
       votes: 0,
-      usageCount: 0,
+      pullCount: 0,
     };
-    this.data.learnings.push(learning);
+    this.data.commits.push(commit);
     this.persist();
-    return learning;
+    return commit;
   }
 
-  get(id: string): Learning | undefined {
-    return this.data.learnings.find((l) => l.id === id);
+  get(id: string): ContextCommit | undefined {
+    return this.data.commits.find((c) => c.id === id);
   }
 
   delete(id: string): boolean {
-    const before = this.data.learnings.length;
-    this.data.learnings = this.data.learnings.filter((l) => l.id !== id);
-    const changed = this.data.learnings.length !== before;
+    const before = this.data.commits.length;
+    this.data.commits = this.data.commits.filter((c) => c.id !== id);
+    const changed = this.data.commits.length !== before;
     if (changed) this.persist();
     return changed;
   }
 
-  vote(id: string, delta: number): Learning | undefined {
-    const learning = this.get(id);
-    if (!learning) return undefined;
-    learning.votes += delta;
-    learning.updatedAt = new Date().toISOString();
+  vote(id: string, delta: number): ContextCommit | undefined {
+    const commit = this.get(id);
+    if (!commit) return undefined;
+    commit.votes += delta;
     this.persist();
-    return learning;
+    return commit;
   }
 
-  markUsed(ids: string[]): void {
-    let changed = false;
-    for (const id of ids) {
-      const learning = this.get(id);
-      if (learning) {
-        learning.usageCount += 1;
-        changed = true;
-      }
-    }
-    if (changed) this.persist();
+  /** The recent timeline for a project (like `git log`), newest first. */
+  log(projectId: string, limit: number): ContextCommit[] {
+    return this.data.commits
+      .filter((c) => c.projectId === projectId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, limit);
   }
 
-  search(opts: {
-    projectId: string;
-    query: string;
-    tags: string[];
-    limit: number;
-  }): SearchResult[] {
-    const { projectId, query, tags, limit } = opts;
-    const queryTokens = tokenize(query);
-    const now = Date.now();
+  /**
+   * Return commits from *other* teammates created since this caller last pulled,
+   * then advance their pull pointer. On first pull, returns the most recent
+   * `limit` commits so they get caught up.
+   */
+  pull(projectId: string, author: string, limit: number): PullResult {
+    const key = `${projectId}::${author}`;
+    const since = this.data.pulls[key] ?? null;
+    const firstPull = since === null;
 
-    const candidates = this.data.learnings.filter(
-      (l) => l.projectId === projectId
-    );
+    const commits = this.data.commits
+      .filter((c) => c.projectId === projectId && c.author !== author)
+      .filter((c) => (since ? c.createdAt > since : true))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, limit);
 
-    // No query and no tags → most recent items.
-    if (queryTokens.length === 0 && tags.length === 0) {
-      return candidates
-        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-        .slice(0, limit)
-        .map((learning) => ({ learning, score: 0 }));
-    }
+    for (const c of commits) c.pullCount += 1;
+    this.data.pulls[key] = new Date().toISOString();
+    this.persist();
 
-    return candidates
-      .map((learning) => {
-        const { match, score } = scoreLearning(learning, {
-          queryTokens,
-          queryTags: tags,
-          now,
-        });
-        return { learning, match, score };
-      })
-      // Require an actual textual/tag match so unrelated queries return nothing.
-      .filter((r) => r.match > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, limit)
-      .map(({ learning, score }) => ({ learning, score }));
+    return { commits, since, firstPull };
   }
 }
 
-function dedupe(arr: string[]): string[] {
-  return [...new Set(arr)];
+function cleanList(arr: string[] | undefined): string[] {
+  return [...new Set((arr ?? []).map((s) => s.trim()).filter(Boolean))];
 }

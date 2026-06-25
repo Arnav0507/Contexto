@@ -1,39 +1,49 @@
-export type LearningKind =
-  | "gotcha"
-  | "decision"
-  | "howto"
-  | "convention"
-  | "other";
+export type CommitKind = "eod" | "breakthrough" | "handoff" | "note";
 
-export interface Learning {
+/**
+ * A "context commit" — a point-in-time snapshot of one person's working context
+ * on a project, captured when they make a breakthrough or wrap up for the day.
+ * Teammates "pull" these to get caught up. Think `git commit`, but for the
+ * mental state around the code rather than the code itself.
+ */
+export interface ContextCommit {
   id: string;
-  /** Logical team/project namespace. Collaborators share the same projectId. */
+  /** Shared namespace, normally derived from the git remote so teammates on the
+   * same repo automatically share a context pool. */
   projectId: string;
   author: string;
-  title: string;
-  content: string;
-  kind: LearningKind;
-  tags: string[];
+  /** One-line headline: what this session was about / the breakthrough. */
+  summary: string;
+  /** Fuller narrative: decisions made, what was tried, why. */
+  details: string;
+  /** Key breakthroughs / decisions, as bullets. */
+  highlights: string[];
+  /** Current state — where a teammate should resume from. */
+  whereILeftOff: string;
+  /** Concrete next actions and/or open questions and blockers. */
+  nextSteps: string[];
+  /** Files touched this session. */
   files: string[];
+  tags: string[];
+  /** Git branch the work happened on, for context. */
+  branch: string;
+  kind: CommitKind;
   createdAt: string;
-  updatedAt: string;
-  /** Net helpful score from teammate votes. Used for curation + ranking. */
   votes: number;
-  /** How many times this learning has been recalled. */
-  usageCount: number;
+  /** How many times teammates have pulled this commit. */
+  pullCount: number;
 }
 
-export interface CreateLearningInput {
+export interface CreateCommitInput {
   projectId: string;
   author: string;
-  title: string;
-  content: string;
-  kind?: LearningKind;
-  tags?: string[];
+  summary: string;
+  details?: string;
+  highlights?: string[];
+  whereILeftOff?: string;
+  nextSteps?: string[];
   files?: string[];
-}
-
-export interface SearchResult {
-  learning: Learning;
-  score: number;
+  tags?: string[];
+  branch?: string;
+  kind?: CommitKind;
 }

@@ -6,7 +6,7 @@
       "args": ["${workspaceFolder}/packages/mcp/dist/index.js"],
       "env": {
         "CONTEXT_SERVER_URL": "http://localhost:4000",
-        "CONTEXT_PROJECT_ID": "demo-project"
+        "CONTEXT_PROJECT_DIR": "${workspaceFolder}"
       }
     }
   }

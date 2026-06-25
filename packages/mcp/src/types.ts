@@ -1,19 +1,25 @@
-export interface Learning {
+export type CommitKind = "eod" | "breakthrough" | "handoff" | "note";
+
+export interface ContextCommit {
   id: string;
   projectId: string;
   author: string;
-  title: string;
-  content: string;
-  kind: string;
-  tags: string[];
+  summary: string;
+  details: string;
+  highlights: string[];
+  whereILeftOff: string;
+  nextSteps: string[];
   files: string[];
+  tags: string[];
+  branch: string;
+  kind: CommitKind;
   createdAt: string;
-  updatedAt: string;
   votes: number;
-  usageCount: number;
+  pullCount: number;
 }
 
-export interface SearchResult {
-  learning: Learning;
-  score: number;
+export interface PullResult {
+  commits: ContextCommit[];
+  since: string | null;
+  firstPull: boolean;
 }

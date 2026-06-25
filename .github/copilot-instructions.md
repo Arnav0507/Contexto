@@ -1,22 +1,39 @@
 # Copilot instructions — shared-agent-context
 
 This repo is a hackathon starter that lets collaborators **share AI/agent context**
-with each other. When one developer's agent learns something non-obvious about the
-project, it captures that learning to a shared store; teammates' agents can then
-recall it instead of rediscovering it.
+with each other. When one developer wraps up or hits a breakthrough, their agent
+**commits** a snapshot of their working context to a shared store; teammates'
+agents **pull** those snapshots to start already caught up instead of rediscovering.
 
 ## Architecture
 
-- `packages/server` — a small **Express REST API** that persists "learnings" to a
-  JSON file (`data/learnings.json`). It exposes create / search / vote / delete and
-  ranks search results by relevance (`src/ranking.ts`).
+- `packages/server` — a small **Express REST API** that persists "context commits"
+  to a JSON file (`data/commits.json`). It exposes commit / log / pull / vote /
+  delete. `pull` is a feed: it returns commits from *other* teammates created
+  since the caller last pulled (tracked per `projectId::author`).
 - `packages/mcp` — a **Model Context Protocol (MCP) server** (stdio) that any MCP
   client (VS Code Copilot, Claude, Cursor) connects to. It exposes the tools
-  `remember_learning`, `recall_context`, `list_recent_learnings`, `vote_learning`,
-  and `forget_learning`, which call the REST API.
+  `pull_context`, `commit_context`, `context_log`, `vote_commit`, and
+  `forget_commit`, which call the REST API. The shared `projectId` and the author
+  are auto-derived from the git repo (`src/git.ts`).
 
-A "learning" = `{ title, content, kind, tags, files, author, votes, usageCount }`,
-scoped to a `projectId` (the shared team namespace).
+A "context commit" is a session snapshot:
+`{ summary, details, highlights[], whereILeftOff, nextSteps[], files[], tags[],
+branch, kind, author, createdAt, votes, pullCount }`, scoped to a `projectId`
+(the shared team namespace, normally the normalized git remote).
+
+## Agent usage protocol
+
+This server exists so collaborators' agents share working context. Use it
+proactively, without waiting to be asked:
+
+- **At the start of a session** on this repo, call `pull_context` to catch up on
+  what teammates shared since the last pull, and factor it into your work.
+- **When you make a breakthrough, finish a chunk of work, or wrap up for the day**,
+  call `commit_context` with a concise snapshot a teammate could resume from
+  (summary, highlights, where you left off, next steps). *You* assemble this from
+  the session — don't make the user write it.
+- Use `context_log` to browse history and `vote_commit` to mark snapshots helpful.
 
 ## Conventions
 
