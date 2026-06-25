@@ -15,6 +15,8 @@ export const config = {
     /\/+$/,
     ""
   ),
+  /** Optional API key for a hosted/shared backend (sent as a Bearer token). */
+  apiKey: process.env.CONTEXT_API_KEY?.trim() || undefined,
   projectDir,
   /** Shared namespace: env override → git remote → repo folder → "default". */
   projectId: process.env.CONTEXT_PROJECT_ID?.trim() || repo.projectId || "default",

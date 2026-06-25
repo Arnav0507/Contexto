@@ -1,13 +1,20 @@
-import { Router } from "express";
+import { Router, type RequestHandler } from "express";
 import type { ContextStore } from "./store.js";
 import type { CreateCommitInput } from "./types.js";
 
-export function createRouter(store: ContextStore): Router {
+export function createRouter(
+  store: ContextStore,
+  authMiddleware: RequestHandler
+): Router {
   const router = Router();
 
+  // Open: liveness probe, no auth required.
   router.get("/health", (_req, res) => {
     res.json({ ok: true });
   });
+
+  // Everything below requires a valid API key (when auth is enabled).
+  router.use(authMiddleware);
 
   // Commit a context snapshot.
   router.post("/commits", (req, res) => {

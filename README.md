@@ -73,27 +73,50 @@ the compiled `dist/`.)
 Copy `.env.example` and adjust. Key variables (set per MCP client in
 `.vscode/mcp.json` → `env`):
 
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `PORT` | `4000` | Port for the REST backend |
-| `SAC_DATA_FILE` | `./data/commits.json` | Where context commits persist |
-| `CONTEXT_SERVER_URL` | `http://localhost:4000` | How the MCP server reaches the backend |
-| `CONTEXT_PROJECT_DIR` | process cwd | Repo to derive the shared id + identity from (set to the workspace in `mcp.json`) |
-| `CONTEXT_PROJECT_ID` | git remote | Override the shared namespace (normally auto-derived) |
-| `CONTEXT_AUTHOR` | git user.name | Override attribution (normally auto-derived) |
+| Variable | Where | Default | Meaning |
+| --- | --- | --- | --- |
+| `PORT` | server | `4000` | Port for the REST backend |
+| `SAC_DATA_FILE` | server | `./data/commits.json` | Where context commits persist |
+| `CONTEXT_API_KEYS` | server | _(empty)_ | Required keys; empty = auth off. `key` or `key:projectId` (scoped), comma-separated |
+| `CONTEXT_SERVER_URL` | mcp | `http://localhost:4000` | How the MCP server reaches the backend |
+| `CONTEXT_API_KEY` | mcp | _(empty)_ | Key sent to a hosted backend (must match one on the server) |
+| `CONTEXT_PROJECT_DIR` | mcp | process cwd | Repo to derive the shared id + identity from (set to the workspace in `mcp.json`) |
+| `CONTEXT_PROJECT_ID` | mcp | git remote | Override the shared namespace (normally auto-derived) |
+| `CONTEXT_AUTHOR` | mcp | git user.name | Override attribution (normally auto-derived) |
+
+## Deploy (share it with your team)
+
+Until it's hosted, sharing is single-machine. To let teammates on different
+machines share one pool:
+
+1. **Run the backend somewhere both can reach.** With Docker (from the repo root):
+   ```bash
+   docker build -t sac-server .
+   docker run -p 4000:4000 -v sac-data:/data \
+     -e CONTEXT_API_KEYS=team-secret:github.com/acme/widget sac-server
+   ```
+   Or deploy that image to Render/Railway/Fly — or, for a quick hackathon share,
+   tunnel a local server with `ngrok http 4000`.
+2. **Point each teammate's MCP server at it** via `.vscode/mcp.json` → `env`:
+   set `CONTEXT_SERVER_URL` to the hosted URL and `CONTEXT_API_KEY` to the team key.
+3. Everyone on the same repo shares one pool automatically (project id = git remote).
+
+> Persistence: the JSON store lives at `SAC_DATA_FILE` (the `/data` volume in
+> Docker). Mount a volume so commits survive restarts; swap for a real DB in prod.
 
 ## Security notes
 
 - Agent context often contains secrets. The MCP server **redacts** common
   credential patterns (`packages/mcp/src/redact.ts`) before sending anything to
   the shared store. It deliberately over-redacts.
-- The demo backend has no auth and stores plaintext JSON locally — fine for a
-  hackathon, **not** for real shared infrastructure. See "Extending" below.
+- The backend supports **API-key auth with project-scoped keys** (`CONTEXT_API_KEYS`);
+  with auth off it's open for local dev. It still stores plaintext JSON, so for
+  production add TLS, a real datastore, and key rotation/audit.
 
 ## Extending (where to take it next)
 
-- **Real backend:** swap the JSON store for SQLite/Postgres; add auth + per-team
-  isolation; deploy so collaborators on different machines actually share one store.
+- **Durable datastore:** the API-key auth + Docker deploy are in place; next swap
+  the JSON file for SQLite/Postgres and add key rotation, audit logging, and rate limits.
 - **Relevance-filtered pull:** let `pull_context` take what you're about to work
   on and rank teammates' commits by relevance, not just recency.
 - **Richer auto-capture:** have the agent assemble commits from the full session
